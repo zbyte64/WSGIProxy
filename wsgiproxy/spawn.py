@@ -59,7 +59,7 @@ class SpawningApplication(object):
     spawn_port_start = 10000
 
     def __init__(self, start_script, cwd=None, script_env=None, spawned_port=None,
-                 idle_shutdown=None, logger=None):
+                 idle_shutdown=None, logger=None, server_socket=None):
         if not spawn_inited:
             spawn_init_lock.acquire()
             try:
@@ -71,6 +71,7 @@ class SpawningApplication(object):
         self.cwd = cwd
         self.script_env = script_env
         self.spawned_port = spawned_port
+        self.server_socket = server_socket
         self.spawn_lock = threading.Lock()
         self.proc = None
         self.idle_shutdown = idle_shutdown
@@ -85,6 +86,10 @@ class SpawningApplication(object):
         apps.append(weakref.ref(self))
 
     def __call__(self, environ, start_response):
+        self.init_proc()
+        return self.send_to_subprocess(environ, start_response)
+    
+    def init_proc(self):
         if self.proc is None:
             self.spawn_lock.acquire()
             try:
@@ -92,7 +97,6 @@ class SpawningApplication(object):
                     self.spawn_subprocess()
             finally:
                 self.spawn_lock.release()
-        return self.send_to_subprocess(environ, start_response)
 
     def send_to_subprocess(self, environ, start_response):
         ## FIXME: I should use the WSGIProxy proxying code, not
@@ -102,6 +106,8 @@ class SpawningApplication(object):
         environ['HTTP_X_FORWARDED_FOR'] = environ['REMOTE_ADDR']
         environ['SERVER_NAME'] = '127.0.0.1'
         environ['SERVER_PORT'] = str(self.spawned_port)
+        if self.server_socket:
+            environ['SERVER_SOCKET'] = self.server_socket
         return proxy_exact_request(environ, start_response)
 
     def spawn_subprocess(self):
@@ -160,6 +166,8 @@ class SpawningApplication(object):
         """
         Finds a free port.
         """
+        if self.server_socket:
+            return self.spawn_port_start
         host = '127.0.0.1'
         port = self.spawn_port_start
         while 1:
@@ -182,8 +190,12 @@ class SpawningApplication(object):
         # moment to be ready to accept connections
         while 1:
             try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.connect(('127.0.0.1', self.spawned_port))
+                if self.server_socket:
+                    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    sock.connect(self.server_socket)
+                else:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.connect(('127.0.0.1', self.spawned_port))
             except socket.error, e:
                 pass
             else:

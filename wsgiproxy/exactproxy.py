@@ -2,7 +2,7 @@ import httplib
 from urllib import quote as url_quote
 import socket
 
-__all__ = ['proxy_exact_request', 'filter_paste_httpserver_proxy']
+__all__ = ['proxy_exact_request']
 
 # Remove these headers from response (specify lower case header
 # names):
@@ -10,35 +10,30 @@ filtered_headers = (
     'transfer-encoding',
 )
 
-def filter_paste_httpserver_proxy(app):
-    """
-    Maps the ``paste.httpserver`` proxy environment keys to
-    SERVER_NAME and SERVER_PORT.  This allows you to use
-    ``paste.httpserver`` as a real HTTP proxy (wrapping
-    ``proxy_exact_request`` with this middleware).
-    """
-    def filter_app(environ, start_response):
-        filter_paste_httpserver_proxy_environ(environ)
-        return app(environ, start_response)
-    return filter_app
+class UnixConnectionMixin(object):
+    def __init__(self, path):
+        self.path = path
+ 
+    def connect(self):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(self.path)
+        self.sock = sock
 
-def filter_paste_httpserver_proxy_environ(environ):
-    if 'paste.httpserver.proxy.scheme' in environ:
-        environ['wsgi.url_scheme'] = environ['paste.httpserver.proxy.scheme']
-    if 'paste.httpserver.proxy.host' in environ:
-        host = environ['paste.httpserver.proxy.host']
-        scheme = environ['wsgi.url_scheme']
-        if ':' in host:
-            host, port = host.split(':', 1)
-        elif scheme == 'http':
-            port = '80'
-        elif scheme == 'https':
-            port = '443'
-        else:
-            assert 0
-        environ['SERVER_NAME'] = host
-        environ['SERVER_PORT'] = port
+class UHTTPConnection(UnixConnectionMixin, httplib.HTTPConnection):
+    """Subclass of Python library HTTPConnection that uses a unix-domain socket.
+    """
+ 
+    def __init__(self, path):
+        httplib.HTTPConnection.__init__(self, 'localhost')
+        UnixConnectionMixin.__init__(self, path)
 
+class UHTTPSConnection(UnixConnectionMixin, httplib.HTTPConnection):
+    """Subclass of Python library HTTPSConnection that uses a unix-domain socket.
+    """
+ 
+    def __init__(self, path):
+        httplib.HTTPSConnection.__init__(self, 'localhost')
+        UnixConnectionMixin.__init__(self, path)
 
 def proxy_exact_request(environ, start_response):
     """
@@ -52,14 +47,24 @@ def proxy_exact_request(environ, start_response):
     Does not add X-Forwarded-For or other standard headers
     """
     scheme = environ['wsgi.url_scheme']
-    if scheme == 'http':
-        ConnClass = httplib.HTTPConnection
-    elif scheme == 'https':
-        ConnClass = httplib.HTTPSConnection
+    if 'SERVER_SOCKET' in environ:
+        if scheme == 'http':
+            ConnClass = UHTTPConnection
+        elif scheme == 'https':
+            ConnClass = UHTTPSConnection
+        else:
+            raise ValueError(
+                "Unknown scheme: %r" % scheme)
+        conn = ConnClass(environ['SERVER_SOCKET'])
     else:
-        raise ValueError(
-            "Unknown scheme: %r" % scheme)
-    conn = ConnClass('%(SERVER_NAME)s:%(SERVER_PORT)s' % environ)
+        if scheme == 'http':
+            ConnClass = httplib.HTTPConnection
+        elif scheme == 'https':
+            ConnClass = httplib.HTTPSConnection
+        else:
+            raise ValueError(
+                "Unknown scheme: %r" % scheme)
+        conn = ConnClass('%(SERVER_NAME)s:%(SERVER_PORT)s' % environ)
     headers = {}
     for key, value in environ.items():
         if key.startswith('HTTP_'):
